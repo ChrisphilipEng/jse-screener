@@ -61,7 +61,7 @@ def fetch_single_ticker(symbol: str) -> dict | None:
         # ── PRICE & MARKET DATA ──
         current_price = info.get("regularMarketPrice") or info.get("currentPrice")
         prev_close = info.get("regularMarketPreviousClose") or info.get("previousClose")
-        market_cap = info.get("marketCap", 0)
+        market_cap = info.get("marketCap")
 
         # ── VALUATION METRICS ──
         pe_trailing = info.get("trailingPE")
@@ -74,39 +74,39 @@ def fetch_single_ticker(symbol: str) -> dict | None:
 
         # ── DIVIDEND / INCOME ──
         div_yield = info.get("dividendYield")
-        if div_yield and div_yield > 0:
+        if div_yield is not None and div_yield != 0:
             div_yield = div_yield * 100  # Convert to percentage
         div_rate = info.get("dividendRate")
         payout_ratio = info.get("payoutRatio")
-        if payout_ratio and payout_ratio > 0:
+        if payout_ratio is not None and payout_ratio != 0:
             payout_ratio = payout_ratio * 100
 
         # ── PROFITABILITY / QUALITY ──
         roe = info.get("returnOnEquity")
-        if roe and abs(roe) < 10:  # Likely a decimal
+        if roe and abs(roe) < 1:  # Likely a decimal
             roe = roe * 100
         roa = info.get("returnOnAssets")
-        if roa and abs(roa) < 10:
+        if roa and abs(roa) < 1:
             roa = roa * 100
         profit_margin = info.get("profitMargins")
-        if profit_margin and abs(profit_margin) < 10:
+        if profit_margin and abs(profit_margin) < 1:
             profit_margin = profit_margin * 100
         operating_margin = info.get("operatingMargins")
-        if operating_margin and abs(operating_margin) < 10:
+        if operating_margin and abs(operating_margin) < 1:
             operating_margin = operating_margin * 100
         debt_to_equity = info.get("debtToEquity")
         current_ratio = info.get("currentRatio")
         quick_ratio = info.get("quickRatio")
         gross_margins = info.get("grossMargins")
-        if gross_margins and abs(gross_margins) < 10:
+        if gross_margins and abs(gross_margins) < 1:
             gross_margins = gross_margins * 100
 
         # ── EARNINGS / GROWTH ──
         earnings_growth = info.get("earningsGrowth")
-        if earnings_growth and abs(earnings_growth) < 10:
+        if earnings_growth and abs(earnings_growth) < 1:
             earnings_growth = earnings_growth * 100
         revenue_growth = info.get("revenueGrowth")
-        if revenue_growth and abs(revenue_growth) < 10:
+        if revenue_growth and abs(revenue_growth) < 1:
             revenue_growth = revenue_growth * 100
         eps_trailing = info.get("trailingEps")
         eps_forward = info.get("forwardEps")
@@ -163,7 +163,7 @@ def fetch_single_ticker(symbol: str) -> dict | None:
             "Price": current_price,
             "Prev_Close": prev_close,
             "Market_Cap": market_cap,
-            "Market_Cap_Bn": round(market_cap / 1e9, 2) if market_cap else None,
+            "Market_Cap_Bn": round(market_cap / 1e9, 2) if market_cap and market_cap > 0 else None,
             # Valuation
             "PE_Trailing": pe_trailing,
             "PE_Forward": pe_forward,
@@ -458,7 +458,7 @@ def get_stock_research(symbol: str) -> dict:
                     {
                         "title": n.get("title", ""),
                         "publisher": n.get("publisher", ""),
-                        "link": n.get("link", ""),
+                        "link": n.get("link") or n.get("url", ""),
                         "published": n.get("providerPublishTime", ""),
                     }
                     for n in news[:10]

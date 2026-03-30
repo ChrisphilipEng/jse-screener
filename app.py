@@ -17,6 +17,7 @@ from datetime import datetime
 import io
 import json
 from pathlib import Path
+import yfinance as yf
 
 from jse_universe import get_universe_df, get_sectors, load_custom_universe
 from data_fetcher import (
@@ -292,7 +293,10 @@ def _load_persisted():
     if PORTFOLIO_FILE.exists():
         try: st.session_state.portfolio = json.loads(PORTFOLIO_FILE.read_text())
         except: pass
-_load_persisted()
+
+if "persisted_loaded" not in st.session_state:
+    _load_persisted()
+    st.session_state.persisted_loaded = True
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -439,31 +443,35 @@ if st.session_state.active_page == "Home":
         with col_left:
             st.markdown('<div class="section-header">Top Gainers</div>', unsafe_allow_html=True)
             if "Price_1D_Pct" in data.columns:
-                top_gain = data.nlargest(8, "Price_1D_Pct")[["Symbol","Company","Price","Price_1D_Pct","Market_Cap_Bn"]].copy()
+                top_gain = data.dropna(subset=["Price_1D_Pct"]).nlargest(8, "Price_1D_Pct")[["Symbol","Company","Price","Price_1D_Pct","Market_Cap_Bn"]].copy()
                 for _, row in top_gain.iterrows():
                     sym = row["Symbol"]
                     name = row.get("Company", sym)
                     price = row["Price"]
                     chg = row["Price_1D_Pct"]
+                    price_str = f"R{price:,.2f}" if pd.notna(price) else "N/A"
+                    chg_str = f"+{chg:.2f}%" if pd.notna(chg) else "N/A"
                     st.markdown(f'''
                     <div class="stock-row">
                         <div><div class="stock-name">{name}</div><div class="stock-symbol">{sym}</div></div>
-                        <div><div class="stock-price">R{price:,.2f}</div><div class="stock-change up">+{chg:.2f}%</div></div>
+                        <div><div class="stock-price">{price_str}</div><div class="stock-change up">{chg_str}</div></div>
                     </div>''', unsafe_allow_html=True)
 
         with col_right:
             st.markdown('<div class="section-header">Top Losers</div>', unsafe_allow_html=True)
             if "Price_1D_Pct" in data.columns:
-                top_lose = data.nsmallest(8, "Price_1D_Pct")[["Symbol","Company","Price","Price_1D_Pct"]].copy()
+                top_lose = data.dropna(subset=["Price_1D_Pct"]).nsmallest(8, "Price_1D_Pct")[["Symbol","Company","Price","Price_1D_Pct"]].copy()
                 for _, row in top_lose.iterrows():
                     sym = row["Symbol"]
                     name = row.get("Company", sym)
                     price = row["Price"]
                     chg = row["Price_1D_Pct"]
+                    price_str = f"R{price:,.2f}" if pd.notna(price) else "N/A"
+                    chg_str = f"{chg:.2f}%" if pd.notna(chg) else "N/A"
                     st.markdown(f'''
                     <div class="stock-row">
                         <div><div class="stock-name">{name}</div><div class="stock-symbol">{sym}</div></div>
-                        <div><div class="stock-price">R{price:,.2f}</div><div class="stock-change down">{chg:.2f}%</div></div>
+                        <div><div class="stock-price">{price_str}</div><div class="stock-change down">{chg_str}</div></div>
                     </div>''', unsafe_allow_html=True)
 
         st.markdown("---")
@@ -471,27 +479,47 @@ if st.session_state.active_page == "Home":
         # ── Sector Heatmap ──
         st.markdown('<div class="section-header">Sector Performance</div>', unsafe_allow_html=True)
         if "Sector" in data.columns and "Price_1D_Pct" in data.columns:
-            sector_perf = data.groupby("Sector").agg(
-                Avg_1D=("Price_1D_Pct", "mean"),
-                Avg_1M=("Price_1M_Pct", "mean"),
-                Avg_6M=("Price_6M_Pct", "mean"),
-                Count=("Symbol", "count"),
-                Mkt_Cap=("Market_Cap_Bn", "sum"),
-            ).round(2)
-            sector_perf = sector_perf.sort_values("Mkt_Cap", ascending=False)
+            try:
+                agg_dict = {
+                    "Avg_1D": ("Price_1D_Pct", "mean"),
+                    "Count": ("Symbol", "count"),
+                    "Mkt_Cap": ("Market_Cap_Bn", "sum"),
+                }
+                if "Price_1M_Pct" in data.columns:
+                    agg_dict["Avg_1M"] = ("Price_1M_Pct", "mean")
+                if "Price_6M_Pct" in data.columns:
+                    agg_dict["Avg_6M"] = ("Price_6M_Pct", "mean")
 
-            fig_sector = go.Figure(data=go.Heatmap(
-                z=[sector_perf["Avg_1D"].values, sector_perf["Avg_1M"].values, sector_perf["Avg_6M"].values],
-                x=sector_perf.index,
-                y=["1 Day", "1 Month", "6 Months"],
-                colorscale=[[0, "#ff453a"], [0.5, "#1c1c1e"], [1, "#30d158"]],
-                zmid=0,
-                text=np.array([sector_perf["Avg_1D"].values, sector_perf["Avg_1M"].values, sector_perf["Avg_6M"].values]).round(1),
-                texttemplate="%{text}%",
-                textfont={"size": 12, "color": "#f5f5f7"},
-            ))
-            fig_sector.update_layout(**PLOTLY_LAYOUT, height=220, margin=dict(t=10, b=30, l=80, r=20))
-            st.plotly_chart(fig_sector, use_container_width=True)
+                sector_perf = data.groupby("Sector").agg(**agg_dict).round(2)
+                sector_perf = sector_perf.sort_values("Mkt_Cap", ascending=False)
+
+                z_data = [sector_perf["Avg_1D"].values]
+                y_labels = ["1 Day"]
+                text_data = [sector_perf["Avg_1D"].values]
+
+                if "Avg_1M" in sector_perf.columns:
+                    z_data.append(sector_perf["Avg_1M"].values)
+                    y_labels.append("1 Month")
+                    text_data.append(sector_perf["Avg_1M"].values)
+                if "Avg_6M" in sector_perf.columns:
+                    z_data.append(sector_perf["Avg_6M"].values)
+                    y_labels.append("6 Months")
+                    text_data.append(sector_perf["Avg_6M"].values)
+
+                fig_sector = go.Figure(data=go.Heatmap(
+                    z=z_data,
+                    x=sector_perf.index,
+                    y=y_labels,
+                    colorscale=[[0, "#ff453a"], [0.5, "#1c1c1e"], [1, "#30d158"]],
+                    zmid=0,
+                    text=np.array(text_data).round(1),
+                    texttemplate="%{text}%",
+                    textfont={"size": 12, "color": "#f5f5f7"},
+                ))
+                fig_sector.update_layout(**PLOTLY_LAYOUT, height=220, margin=dict(t=10, b=30, l=80, r=20))
+                st.plotly_chart(fig_sector, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not generate sector heatmap: {str(e)}")
 
         # ── Top Analyst Picks ──
         st.markdown('<div class="section-header">Top Analyst Picks</div>', unsafe_allow_html=True)
@@ -505,6 +533,9 @@ if st.session_state.active_page == "Home":
                     rec_html = _rec_badge(row.get("Analyst_Rec"))
                     upside = row["Upside_Pct"]
                     up_color = "#30d158" if upside > 0 else "#ff453a"
+                    price_str = f"R{row['Price']:,.2f}" if pd.notna(row.get("Price")) else "N/A"
+                    target_mean = row.get("Target_Mean")
+                    target_str = f"R{target_mean:,.2f}" if pd.notna(target_mean) else "N/A"
                     st.markdown(f'''
                     <div class="stock-row">
                         <div style="display:flex;align-items:center;gap:12px;">
@@ -512,7 +543,7 @@ if st.session_state.active_page == "Home":
                             <div><div class="stock-name">{row.get("Company", row["Symbol"])}</div><div class="stock-symbol">{row["Symbol"]}</div></div>
                         </div>
                         <div style="display:flex;align-items:center;gap:24px;">
-                            <div style="text-align:right;"><div class="stock-price">R{row["Price"]:,.2f}</div><div style="font-size:0.78rem;color:#86868b;">Target: R{row.get("Target_Mean",0):,.2f}</div></div>
+                            <div style="text-align:right;"><div class="stock-price">{price_str}</div><div style="font-size:0.78rem;color:#86868b;">Target: {target_str}</div></div>
                             <div style="font-size:1.1rem;font-weight:700;color:{up_color};min-width:70px;text-align:right;">{upside:+.1f}%</div>
                         </div>
                     </div>''', unsafe_allow_html=True)
@@ -580,60 +611,64 @@ elif st.session_state.active_page == "Screener":
         # ── Summary ──
         s1, s2, s3, s4 = st.columns(4)
         s1.metric("Results", len(filtered))
-        s2.metric("Pass Rate", f"{len(filtered)/max(len(data),1)*100:.0f}%")
+        pass_rate = len(filtered)/max(len(data),1)*100 if len(data) > 0 else 0
+        s2.metric("Pass Rate", f"{pass_rate:.0f}%")
         avg_up = filtered["Upside_Pct"].median() if "Upside_Pct" in filtered.columns else None
         s3.metric("Median Upside", f"{avg_up:+.1f}%" if pd.notna(avg_up) else "N/A")
         avg_yield = filtered["Div_Yield_Pct"].median() if "Div_Yield_Pct" in filtered.columns else None
         s4.metric("Median Yield", f"{avg_yield:.2f}%" if pd.notna(avg_yield) else "N/A")
 
-        # ── Results Table ──
-        display_cols = ["Symbol", "Company", "Sector", "Price", "Analyst_Rec", "Target_Mean",
-                       "Upside_Pct", "Market_Cap_Bn", "PE_Trailing", "Div_Yield_Pct",
-                       "ROE_Pct", "Price_1M_Pct", "Price_6M_Pct", "RSI_14", "Beta"]
-        available = [c for c in display_cols if c in filtered.columns]
-        st.dataframe(
-            filtered[available],
-            use_container_width=True,
-            height=500,
-            column_config={
-                "Price": st.column_config.NumberColumn(format="R %.2f"),
-                "Market_Cap_Bn": st.column_config.NumberColumn("Mkt Cap (Bn)", format="R %.2f"),
-                "PE_Trailing": st.column_config.NumberColumn("P/E", format="%.1f"),
-                "Div_Yield_Pct": st.column_config.NumberColumn("Div Yield %", format="%.2f%%"),
-                "ROE_Pct": st.column_config.NumberColumn("ROE %", format="%.1f%%"),
-                "Price_1M_Pct": st.column_config.NumberColumn("1M %", format="%.2f%%"),
-                "Price_6M_Pct": st.column_config.NumberColumn("6M %", format="%.2f%%"),
-                "RSI_14": st.column_config.NumberColumn("RSI", format="%.1f"),
-                "Beta": st.column_config.NumberColumn("Beta", format="%.2f"),
-                "Analyst_Rec": st.column_config.TextColumn("Analyst"),
-                "Target_Mean": st.column_config.NumberColumn("Target", format="R %.2f"),
-                "Upside_Pct": st.column_config.NumberColumn("Upside %", format="%.1f%%"),
-            },
-        )
+        if len(filtered) == 0:
+            st.warning("No stocks match the current filter criteria. Try adjusting your filters.")
+        else:
+            # ── Results Table ──
+            display_cols = ["Symbol", "Company", "Sector", "Price", "Analyst_Rec", "Target_Mean",
+                           "Upside_Pct", "Market_Cap_Bn", "PE_Trailing", "Div_Yield_Pct",
+                           "ROE_Pct", "Price_1M_Pct", "Price_6M_Pct", "RSI_14", "Beta"]
+            available = [c for c in display_cols if c in filtered.columns]
+            st.dataframe(
+                filtered[available],
+                use_container_width=True,
+                height=500,
+                column_config={
+                    "Price": st.column_config.NumberColumn(format="R %.2f"),
+                    "Market_Cap_Bn": st.column_config.NumberColumn("Mkt Cap (Bn)", format="R %.2f"),
+                    "PE_Trailing": st.column_config.NumberColumn("P/E", format="%.1f"),
+                    "Div_Yield_Pct": st.column_config.NumberColumn("Div Yield %", format="%.2f%%"),
+                    "ROE_Pct": st.column_config.NumberColumn("ROE %", format="%.1f%%"),
+                    "Price_1M_Pct": st.column_config.NumberColumn("1M %", format="%.2f%%"),
+                    "Price_6M_Pct": st.column_config.NumberColumn("6M %", format="%.2f%%"),
+                    "RSI_14": st.column_config.NumberColumn("RSI", format="%.1f"),
+                    "Beta": st.column_config.NumberColumn("Beta", format="%.2f"),
+                    "Analyst_Rec": st.column_config.TextColumn("Analyst"),
+                    "Target_Mean": st.column_config.NumberColumn("Target", format="R %.2f"),
+                    "Upside_Pct": st.column_config.NumberColumn("Upside %", format="%.1f%%"),
+                },
+            )
 
-        # ── Quick Research Buttons ──
-        st.markdown("---")
-        st.markdown("**Open Research** — click a stock below:")
-        btn_cols = st.columns(10)
-        for idx, sym in enumerate(filtered["Symbol"].tolist()[:30]):
-            with btn_cols[idx % 10]:
-                label = sym.replace(".JO", "")
-                if st.button(label, key=f"scr_{sym}"):
-                    st.session_state.research_symbol = sym
-                    st.session_state.active_page = "Research"
-                    st.rerun()
+            # ── Quick Research Buttons ──
+            st.markdown("---")
+            st.markdown("**Open Research** — click a stock below:")
+            btn_cols = st.columns(10)
+            for idx, sym in enumerate(filtered["Symbol"].tolist()[:30]):
+                with btn_cols[idx % 10]:
+                    label = sym.replace(".JO", "")
+                    if st.button(label, key=f"scr_{sym}"):
+                        st.session_state.research_symbol = sym
+                        st.session_state.active_page = "Research"
+                        st.rerun()
 
-        # ── Export ──
-        st.markdown("---")
-        ex1, ex2 = st.columns(2)
-        with ex1:
-            csv = filtered.to_csv(index=False)
-            st.download_button("Download CSV", csv, f"jse_screen_{datetime.now():%Y%m%d_%H%M}.csv", "text/csv", use_container_width=True)
-        with ex2:
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as w:
-                filtered.to_excel(w, sheet_name="Results", index=False)
-            st.download_button("Download Excel", buf.getvalue(), f"jse_screen_{datetime.now():%Y%m%d_%H%M}.xlsx", use_container_width=True)
+            # ── Export ──
+            st.markdown("---")
+            ex1, ex2 = st.columns(2)
+            with ex1:
+                csv = filtered.to_csv(index=False)
+                st.download_button("Download CSV", csv, f"jse_screen_{datetime.now():%Y%m%d_%H%M}.csv", "text/csv", use_container_width=True)
+            with ex2:
+                buf = io.BytesIO()
+                with pd.ExcelWriter(buf, engine="openpyxl") as w:
+                    filtered.to_excel(w, sheet_name="Results", index=False)
+                st.download_button("Download Excel", buf.getvalue(), f"jse_screen_{datetime.now():%Y%m%d_%H%M}.xlsx", use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -940,8 +975,13 @@ elif st.session_state.active_page == "Portfolio":
 
             mkt_val = shares * current_p if current_p else 0
             total_value += mkt_val
-            pnl = mkt_val - cost
-            pnl_pct = (pnl / cost * 100) if cost > 0 else 0
+
+            if current_p is None:
+                pnl = None
+                pnl_pct = None
+            else:
+                pnl = mkt_val - cost
+                pnl_pct = (pnl / cost * 100) if cost > 0 else 0
 
             portfolio_rows.append({
                 "idx": i, "symbol": sym, "name": name, "shares": shares,
@@ -972,9 +1012,14 @@ elif st.session_state.active_page == "Portfolio":
 
         # Holdings table
         for pr in portfolio_rows:
-            pnl_c = "up" if pr["pnl"] >= 0 else "down"
-            pnl_sign = "+" if pr["pnl"] >= 0 else ""
-            curr_p = f"R{pr['current_price']:,.2f}" if pr["current_price"] else "N/A"
+            curr_p = f"R{pr['current_price']:,.2f}" if pr["current_price"] else "No price data"
+
+            if pr["pnl"] is None or pr["pnl_pct"] is None:
+                pnl_display = '<div class="stock-change" style="color:#86868b;">No price data</div><div class="stock-change" style="color:#86868b;">—</div>'
+            else:
+                pnl_c = "up" if pr["pnl"] >= 0 else "down"
+                pnl_sign = "+" if pr["pnl"] >= 0 else ""
+                pnl_display = f'<div class="stock-change {pnl_c}">{pnl_sign}R{abs(pr["pnl"]):,.2f}</div><div class="stock-change {pnl_c}">{pnl_sign}{abs(pr["pnl_pct"]):.1f}%</div>'
 
             hc1, hc2, hc3 = st.columns([5, 1, 1])
             with hc1:
@@ -990,8 +1035,7 @@ elif st.session_state.active_page == "Portfolio":
                             <div style="font-size:0.78rem;color:#86868b;">Value: R{pr["value"]:,.2f}</div>
                         </div>
                         <div style="text-align:right;min-width:90px;">
-                            <div class="stock-change {pnl_c}">{pnl_sign}R{abs(pr["pnl"]):,.2f}</div>
-                            <div class="stock-change {pnl_c}">{pnl_sign}{abs(pr["pnl_pct"]):.1f}%</div>
+                            {pnl_display}
                         </div>
                     </div>
                 </div>''', unsafe_allow_html=True)
@@ -1051,7 +1095,7 @@ elif st.session_state.active_page == "Sectors":
             with ch2:
                 st.markdown("**Median Upside by Sector**")
                 if "Avg_Upside" in sector_stats.columns:
-                    colors = ["#30d158" if v > 0 else "#ff453a" for v in sector_stats["Avg_Upside"]]
+                    colors = ["#30d158" if pd.notna(v) and v > 0 else "#ff453a" if pd.notna(v) else "#38383a" for v in sector_stats["Avg_Upside"]]
                     fig_up = go.Figure(go.Bar(x=sector_stats.index, y=sector_stats["Avg_Upside"],
                                              marker_color=colors))
                     fig_up.update_layout(**PLOTLY_LAYOUT, height=350)
@@ -1085,7 +1129,7 @@ elif st.session_state.active_page == "News":
             st.markdown(f'**{sym.replace(".JO","")}**')
             with st.spinner(f"Loading news for {sym}..."):
                 try:
-                    stock = __import__("yfinance").Ticker(sym)
+                    stock = yf.Ticker(sym)
                     news_items = stock.news or []
                 except Exception:
                     news_items = []
@@ -1113,7 +1157,7 @@ elif st.session_state.active_page == "News":
         earnings_data = []
         for sym in cal_stocks[:10]:
             try:
-                stock = __import__("yfinance").Ticker(sym)
+                stock = yf.Ticker(sym)
                 cal = stock.calendar
                 if cal is not None and not (isinstance(cal, pd.DataFrame) and cal.empty):
                     if isinstance(cal, dict):
