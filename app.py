@@ -396,6 +396,11 @@ if st.session_state.active_page == "Home":
                         if f"{col}_u" in data.columns:
                             data[col] = data[col].fillna(data[f"{col}_u"])
                             data.drop(columns=[f"{col}_u"], inplace=True, errors="ignore")
+                    # Fill remaining NaN Company/Sector (stocks not in universe)
+                    if "Company" in data.columns:
+                        data["Company"] = data["Company"].fillna(data["Symbol"].str.replace(".JO","",regex=False))
+                    if "Sector" in data.columns:
+                        data["Sector"] = data["Sector"].fillna("Other")
                     st.session_state.screener_data = data
                     st.session_state.last_fetch_time = datetime.now()
                     st.rerun()
@@ -412,6 +417,10 @@ if st.session_state.active_page == "Home":
                         if f"{col}_u" in data.columns:
                             data[col] = data[col].fillna(data[f"{col}_u"])
                             data.drop(columns=[f"{col}_u"], inplace=True, errors="ignore")
+                    if "Company" in data.columns:
+                        data["Company"] = data["Company"].fillna(data["Symbol"].str.replace(".JO","",regex=False))
+                    if "Sector" in data.columns:
+                        data["Sector"] = data["Sector"].fillna("Other")
                     st.session_state.screener_data = data
                     st.session_state.last_fetch_time = datetime.now()
                     st.rerun()
@@ -432,7 +441,8 @@ if st.session_state.active_page == "Home":
         m4.metric("Total Mkt Cap", f"R{total_mcap:,.0f}B" if pd.notna(total_mcap) else "N/A")
         gainers = len(data[data["Price_1D_Pct"] > 0]) if "Price_1D_Pct" in data.columns else 0
         losers = len(data[data["Price_1D_Pct"] < 0]) if "Price_1D_Pct" in data.columns else 0
-        m5.metric("Gainers", f"{gainers}", delta=f"{gainers}/{gainers+losers}")
+        total_moved = gainers + losers
+        m5.metric("Gainers", f"{gainers}", delta=f"{gainers}/{total_moved}" if total_moved > 0 else "No data")
         m6.metric("Losers", f"{losers}")
 
         st.markdown("---")
@@ -599,6 +609,9 @@ elif st.session_state.active_page == "Screener":
         # Apply filters
         if selected_strategy != "No Preset (Manual)":
             filtered = apply_strategy(data, selected_strategy)
+            # Also apply sector filter on top of strategy
+            if selected_sectors and len(selected_sectors) < len(available_sectors):
+                filtered = filtered[filtered["Sector"].isin(selected_sectors)] if "Sector" in filtered.columns else filtered
             strat_info = STRATEGIES[selected_strategy]
             st.info(f"**{selected_strategy}** — {strat_info['description']}")
         else:
@@ -970,27 +983,30 @@ elif st.session_state.active_page == "Portfolio":
             if data is not None:
                 row = data[data["Symbol"] == sym]
                 if len(row) > 0:
-                    current_p = row.iloc[0].get("Price")
-                    name = row.iloc[0].get("Company", sym)
+                    price_val = row.iloc[0].get("Price")
+                    current_p = float(price_val) if pd.notna(price_val) else None
+                    company_val = row.iloc[0].get("Company", sym)
+                    name = company_val if pd.notna(company_val) else sym
 
-            mkt_val = shares * current_p if current_p else 0
-            total_value += mkt_val
+            mkt_val = shares * current_p if current_p is not None else None
+            if mkt_val is not None:
+                total_value += mkt_val
 
             if current_p is None:
-                pnl = None
-                pnl_pct = None
-            else:
                 pnl = mkt_val - cost
                 pnl_pct = (pnl / cost * 100) if cost > 0 else 0
 
             portfolio_rows.append({
                 "idx": i, "symbol": sym, "name": name, "shares": shares,
                 "avg_price": avg_p, "current_price": current_p,
-                "cost": cost, "value": mkt_val, "pnl": pnl, "pnl_pct": pnl_pct,
+                "cost": cost, "value": mkt_val if mkt_val is not None else 0,
+                "pnl": pnl, "pnl_pct": pnl_pct,
             })
 
-        total_pnl = total_value - total_cost
-        total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0
+        # Only calculate P&L from holdings with price data
+        has_price_cost = sum(pr["cost"] for pr in portfolio_rows if pr["current_price"] is not None)
+        total_pnl = total_value - has_price_cost if has_price_cost > 0 else 0
+        total_pnl_pct = (total_pnl / has_price_cost * 100) if has_price_cost > 0 else 0
 
         # Summary
         ps1, ps2, ps3, ps4 = st.columns(4)
@@ -1065,18 +1081,24 @@ elif st.session_state.active_page == "Sectors":
         data = st.session_state.screener_data.copy()
 
         if "Sector" in data.columns:
-            # Sector summary table
-            sector_stats = data.groupby("Sector").agg(
-                Stocks=("Symbol", "count"),
-                Mkt_Cap_Bn=("Market_Cap_Bn", "sum"),
-                Avg_PE=("PE_Trailing", "median"),
-                Avg_DY=("Div_Yield_Pct", "median"),
-                Avg_ROE=("ROE_Pct", "median"),
-                Avg_1D=("Price_1D_Pct", "mean"),
-                Avg_1M=("Price_1M_Pct", "mean"),
-                Avg_6M=("Price_6M_Pct", "mean"),
-                Avg_Upside=("Upside_Pct", "median"),
-            ).round(2).sort_values("Mkt_Cap_Bn", ascending=False)
+            # Sector summary table — only aggregate columns that exist
+            agg_spec = {"Stocks": ("Symbol", "count")}
+            col_map = {
+                "Mkt_Cap_Bn": ("Market_Cap_Bn", "sum"),
+                "Avg_PE": ("PE_Trailing", "median"),
+                "Avg_DY": ("Div_Yield_Pct", "median"),
+                "Avg_ROE": ("ROE_Pct", "median"),
+                "Avg_1D": ("Price_1D_Pct", "mean"),
+                "Avg_1M": ("Price_1M_Pct", "mean"),
+                "Avg_6M": ("Price_6M_Pct", "mean"),
+                "Avg_Upside": ("Upside_Pct", "median"),
+            }
+            for agg_name, (col, func) in col_map.items():
+                if col in data.columns:
+                    agg_spec[agg_name] = (col, func)
+            sector_stats = data.groupby("Sector").agg(**agg_spec).round(2)
+            sort_col = "Mkt_Cap_Bn" if "Mkt_Cap_Bn" in sector_stats.columns else "Stocks"
+            sector_stats = sector_stats.sort_values(sort_col, ascending=False)
 
             st.dataframe(sector_stats, use_container_width=True, height=400)
 
@@ -1129,8 +1151,8 @@ elif st.session_state.active_page == "News":
             st.markdown(f'**{sym.replace(".JO","")}**')
             with st.spinner(f"Loading news for {sym}..."):
                 try:
-                    stock = yf.Ticker(sym)
-                    news_items = stock.news or []
+                    research = get_stock_research(sym)
+                    news_items = research.get("news", [])
                 except Exception:
                     news_items = []
 
@@ -1138,7 +1160,7 @@ elif st.session_state.active_page == "News":
                 for article in news_items[:5]:
                     title = article.get("title", "Untitled")
                     publisher = article.get("publisher", "")
-                    link = article.get("link", "")
+                    link = article.get("link") or article.get("url", "")
                     if link:
                         st.markdown(f'- [{title}]({link}) — *{publisher}*')
                     else:
@@ -1161,11 +1183,16 @@ elif st.session_state.active_page == "News":
                 cal = stock.calendar
                 if cal is not None and not (isinstance(cal, pd.DataFrame) and cal.empty):
                     if isinstance(cal, dict):
-                        earnings_date = cal.get("Earnings Date", [None])
-                        if isinstance(earnings_date, list) and earnings_date:
-                            earnings_data.append({"Symbol": sym, "Earnings Date": str(earnings_date[0])})
-                    elif isinstance(cal, pd.DataFrame):
-                        earnings_data.append({"Symbol": sym, "Earnings Date": str(cal.iloc[0, 0]) if len(cal) > 0 else "N/A"})
+                        earnings_date = cal.get("Earnings Date")
+                        if earnings_date is not None:
+                            if isinstance(earnings_date, list) and len(earnings_date) > 0 and earnings_date[0] is not None:
+                                earnings_data.append({"Symbol": sym, "Earnings Date": str(earnings_date[0])})
+                            elif not isinstance(earnings_date, list) and earnings_date is not None:
+                                earnings_data.append({"Symbol": sym, "Earnings Date": str(earnings_date)})
+                    elif isinstance(cal, pd.DataFrame) and len(cal) > 0:
+                        val = cal.iloc[0, 0]
+                        if pd.notna(val):
+                            earnings_data.append({"Symbol": sym, "Earnings Date": str(val)})
             except Exception:
                 pass
         if earnings_data:

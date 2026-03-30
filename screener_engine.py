@@ -102,14 +102,17 @@ def apply_filters(
         if "Sector" in filtered.columns:
             filtered = filtered[filtered["Sector"].isin(sectors)]
 
-    # Range filters
+    # Range filters — preserve rows where the column is NaN
+    # (NaN means data not available, not that it fails the filter)
     for col, (min_val, max_val) in filters.items():
         if col not in filtered.columns:
             continue
+        is_nan = filtered[col].isna()
         if min_val is not None:
-            filtered = filtered[filtered[col] >= min_val]
+            filtered = filtered[is_nan | (filtered[col] >= min_val)]
         if max_val is not None:
-            filtered = filtered[filtered[col] <= max_val]
+            is_nan = filtered[col].isna()  # Recompute after potential row removal
+            filtered = filtered[is_nan | (filtered[col] <= max_val)]
 
     return filtered.reset_index(drop=True)
 
