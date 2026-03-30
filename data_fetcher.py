@@ -143,6 +143,21 @@ def fetch_single_ticker(symbol: str) -> dict | None:
         # Beta
         beta = info.get("beta")
 
+        # ── ANALYST RECOMMENDATIONS & TARGET PRICE ──
+        analyst_rec = info.get("recommendationKey")  # e.g. "buy", "hold", "sell"
+        analyst_rec_label = _format_recommendation(analyst_rec)
+        analyst_mean_score = info.get("recommendationMean")  # 1=Strong Buy, 5=Sell
+        num_analysts = info.get("numberOfAnalystOpinions")
+        target_high = info.get("targetHighPrice")
+        target_low = info.get("targetLowPrice")
+        target_mean = info.get("targetMeanPrice")
+        target_median = info.get("targetMedianPrice")
+
+        # Upside/downside from current price to mean target
+        upside_pct = None
+        if target_mean and current_price and current_price > 0:
+            upside_pct = round((target_mean - current_price) / current_price * 100, 2)
+
         return {
             "Symbol": symbol,
             "Price": current_price,
@@ -192,11 +207,39 @@ def fetch_single_ticker(symbol: str) -> dict | None:
             "Pct_From_52W_High": pct_from_52w_high,
             "Volatility_Ann_Pct": volatility,
             "Beta": beta,
+            # Analyst data
+            "Analyst_Rec": analyst_rec_label,
+            "Analyst_Score": analyst_mean_score,
+            "Num_Analysts": num_analysts,
+            "Target_High": target_high,
+            "Target_Low": target_low,
+            "Target_Mean": target_mean,
+            "Target_Median": target_median,
+            "Upside_Pct": upside_pct,
         }
 
     except Exception as e:
         logger.warning(f"Failed to fetch {symbol}: {e}")
         return None
+
+
+def _format_recommendation(rec_key: str | None) -> str | None:
+    """Convert yfinance recommendation key to display label."""
+    if not rec_key:
+        return None
+    mapping = {
+        "strongBuy": "Strong Buy",
+        "strong_buy": "Strong Buy",
+        "buy": "Buy",
+        "overweight": "Overweight",
+        "hold": "Hold",
+        "neutral": "Hold",
+        "underweight": "Underweight",
+        "sell": "Sell",
+        "strongSell": "Strong Sell",
+        "strong_sell": "Strong Sell",
+    }
+    return mapping.get(rec_key, rec_key.replace("_", " ").title())
 
 
 def _pct_change(series: pd.Series, periods: int) -> float | None:
@@ -316,3 +359,127 @@ def get_company_info(symbol: str) -> dict:
         }
     except Exception:
         return {"Name": symbol, "Sector": "N/A", "Industry": "N/A"}
+
+
+def get_stock_research(symbol: str) -> dict:
+    """
+    Fetch comprehensive research data for the stock detail deep-dive.
+    Includes financials, analyst data, news, and key events.
+    """
+    try:
+        stock = yf.Ticker(symbol)
+        info = stock.info
+        result = {}
+
+        # ── Company Overview ──
+        result["overview"] = {
+            "name": info.get("longName", info.get("shortName", symbol)),
+            "sector": info.get("sector", "N/A"),
+            "industry": info.get("industry", "N/A"),
+            "description": info.get("longBusinessSummary", ""),
+            "website": info.get("website"),
+            "employees": info.get("fullTimeEmployees"),
+            "country": info.get("country", "South Africa"),
+            "currency": info.get("currency", "ZAR"),
+        }
+
+        # ── Analyst Recommendations ──
+        result["analyst"] = {
+            "recommendation": _format_recommendation(info.get("recommendationKey")),
+            "mean_score": info.get("recommendationMean"),
+            "num_analysts": info.get("numberOfAnalystOpinions"),
+            "target_high": info.get("targetHighPrice"),
+            "target_low": info.get("targetLowPrice"),
+            "target_mean": info.get("targetMeanPrice"),
+            "target_median": info.get("targetMedianPrice"),
+            "current_price": info.get("regularMarketPrice") or info.get("currentPrice"),
+        }
+        price = result["analyst"]["current_price"]
+        tmean = result["analyst"]["target_mean"]
+        result["analyst"]["upside_pct"] = (
+            round((tmean - price) / price * 100, 2) if tmean and price and price > 0 else None
+        )
+
+        # ── Recommendation Trends (quarterly breakdown) ──
+        try:
+            rec_df = stock.recommendations
+            if rec_df is not None and not rec_df.empty:
+                result["rec_trends"] = rec_df.tail(8).to_dict("records")
+            else:
+                result["rec_trends"] = []
+        except Exception:
+            result["rec_trends"] = []
+
+        # ── Income Statement (annual) ──
+        try:
+            inc = stock.financials
+            if inc is not None and not inc.empty:
+                result["income_statement"] = inc.to_dict()
+            else:
+                result["income_statement"] = {}
+        except Exception:
+            result["income_statement"] = {}
+
+        # ── Balance Sheet ──
+        try:
+            bs = stock.balance_sheet
+            if bs is not None and not bs.empty:
+                result["balance_sheet"] = bs.to_dict()
+            else:
+                result["balance_sheet"] = {}
+        except Exception:
+            result["balance_sheet"] = {}
+
+        # ── Cash Flow ──
+        try:
+            cf = stock.cashflow
+            if cf is not None and not cf.empty:
+                result["cash_flow"] = cf.to_dict()
+            else:
+                result["cash_flow"] = {}
+        except Exception:
+            result["cash_flow"] = {}
+
+        # ── Major Holders ──
+        try:
+            holders = stock.institutional_holders
+            if holders is not None and not holders.empty:
+                result["institutional_holders"] = holders.head(10).to_dict("records")
+            else:
+                result["institutional_holders"] = []
+        except Exception:
+            result["institutional_holders"] = []
+
+        # ── News ──
+        try:
+            news = stock.news
+            if news:
+                result["news"] = [
+                    {
+                        "title": n.get("title", ""),
+                        "publisher": n.get("publisher", ""),
+                        "link": n.get("link", ""),
+                        "published": n.get("providerPublishTime", ""),
+                    }
+                    for n in news[:10]
+                ]
+            else:
+                result["news"] = []
+        except Exception:
+            result["news"] = []
+
+        # ── Dividend History ──
+        try:
+            divs = stock.dividends
+            if divs is not None and not divs.empty:
+                result["dividends"] = divs.tail(20).reset_index().to_dict("records")
+            else:
+                result["dividends"] = []
+        except Exception:
+            result["dividends"] = []
+
+        return result
+
+    except Exception as e:
+        logger.warning(f"Failed to fetch research for {symbol}: {e}")
+        return {"overview": {"name": symbol}, "analyst": {}, "news": []}

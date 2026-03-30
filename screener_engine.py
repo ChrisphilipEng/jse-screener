@@ -57,6 +57,12 @@ FILTER_GROUPS = {
         "Earnings Growth (%)": "Earnings_Growth_Pct",
         "Revenue Growth (%)": "Revenue_Growth_Pct",
     },
+    "Analyst & Target": {
+        "Analyst Score (1=Strong Buy)": "Analyst_Score",
+        "# Analysts Covering": "Num_Analysts",
+        "Target Price (Mean)": "Target_Mean",
+        "Upside to Target (%)": "Upside_Pct",
+    },
     "Size & Liquidity": {
         "Market Cap (Bn ZAR)": "Market_Cap_Bn",
         "Avg Volume (20D)": "Avg_Vol_20D",
